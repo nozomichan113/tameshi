@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>講習受講確認票 PDF読み取り</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP","Yu Gothic",sans-serif}
+header{background:linear-gradient(135deg,#17324d,#1769aa);color:#fff;padding:20px}
+h1{margin:0 0 5px;font-size:21px}header p{margin:0;font-size:13px;opacity:.9}
+main{max-width:1200px;margin:auto;padding:16px}.card{background:#fff;border:1px solid #d9e1ea;border-radius:15px;padding:16px;margin-bottom:15px}
+.drop{border:2px dashed #aebdca;border-radius:13px;padding:28px 16px;text-align:center;background:#fbfdff}.drop.drag{border-color:#1769aa;background:#eef7ff}
+input[type=file]{display:none}.btn{border:0;border-radius:9px;padding:11px 15px;font-weight:700;cursor:pointer;font-size:14px}.primary{background:#1769aa;color:#fff}.secondary{background:#edf2f6;color:#17324d}.danger{background:#ffe5e5;color:#9d2020}.btn:disabled{opacity:.45}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}.status{font-size:13px;color:#566978;margin-top:12px;min-height:20px}.progress{height:8px;background:#e7edf2;border-radius:99px;overflow:hidden;margin-top:8px}.bar{height:100%;width:0;background:#2c8fd6}
+.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:1000px}th,td{border-bottom:1px solid #d9e1ea;padding:8px;text-align:left;vertical-align:middle}th{background:#f5f8fb;font-size:12px;white-space:nowrap}td input,td select{width:100%;padding:7px;border:1px solid #cbd6df;border-radius:7px;font:inherit}tr.warn{background:#fff4cc}tr.ok{background:#edf9f0}.small{font-size:11px;color:#697a88}.empty{text-align:center;color:#748493;padding:30px}
+</style>
+</head>
+<body>
+<header><h1>📄 講習受講確認票 PDF → 一覧化</h1><p>番号・名前・クラス・変更有無・科目・変更内容・変更理由を読み取ります。</p></header>
+<main>
+<section class="card">
+<div id="drop" class="drop">
+<strong>スキャンPDFをここに入れる</strong><br><span class="small">複数PDFにも対応</span>
+<div class="controls" style="justify-content:center"><label class="btn primary">📄 PDFを選ぶ<input id="files" type="file" accept="application/pdf,.pdf" multiple></label></div>
+</div>
+<div class="controls">
+<button id="run" class="btn primary" disabled>🔍 PDFを読み取る</button>
+<button id="csv" class="btn secondary" disabled>⬇ CSVダウンロード</button>
+<button id="clear" class="btn danger" disabled>クリア</button>
+</div>
+<div id="status" class="status">PDFを選択してください。</div><div class="progress"><div id="bar" class="bar"></div></div>
+</section>
+
+<section class="card">
+<strong>読み取り結果</strong>　<span id="count">0件</span>
+<div class="table-wrap" style="margin-top:10px">
+<table><thead><tr>
+<th>#</th><th>番号</th><th>名前</th><th>クラス</th><th>変更</th><th>科目</th><th>変更内容</th><th>変更理由</th><th>PDF / ページ</th>
+</tr></thead>
+<tbody id="tbody"><tr><td colspan="9" class="empty">まだ結果がありません。</td></tr></tbody></table>
+</div>
+</section>
+
+<section class="card small">
+<b>読み取り方式：</b>今回送ってもらった帳票画像（横1536×縦864）の位置関係を基準に、項目ごとに別々の領域を切り出してOCRします。チェック欄は文字OCRではなく、枠内の濃さを画像判定します。黄色の行は必ず確認してください。
+</section>
+</main>
+
+<script>
+const filesEl=document.getElementById("files"),drop=document.getElementById("drop"),run=document.getElementById("run");
+const csv=document.getElementById("csv"),clear=document.getElementById("clear"),status=document.getElementById("status"),bar=document.getElementById("bar"),tbody=document.getElementById("tbody"),count=document.getElementById("count");
+let files=[],rows=[];
+
+function setFiles(a){files=[...a].filter(f=>f.type==="application/pdf"||f.name.toLowerCase().endsWith(".pdf"));run.disabled=!files.length;clear.disabled=!files.length&&!rows.length;status.textContent=files.length?`${files.length}個のPDFを選択しました。`:"PDFを選択してください。";}
+filesEl.onchange=e=>setFiles(e.target.files);
+["dragenter","dragover"].forEach(x=>drop.addEventListener(x,e=>{e.preventDefault();drop.classList.add("drag")}));
+["dragleave","drop"].forEach(x=>drop.addEventListener(x,e=>{e.preventDefault();drop.classList.remove("drag")}));
+drop.addEventListener("drop",e=>setFiles(e.dataTransfer.files));
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+
+function norm(s){return (s||"").replace(/\r/g," ").replace(/\n+/g," ").replace(/[ \t]+/g," ").trim()}
+function parseNumber(t){let m=t.match(/TDS\s*([0-9]{5,8})/i);if(m)return "TDS"+m[1];m=t.match(/\b([0-9]{5,8})\b/);return m?m[1]:""}
+function parseName(t){let m=t.match(/([一-龯々ぁ-んァ-ヶー]{1,8})\s*([一-龯々ぁ-んァ-ヶー]{1,8})\s*様/);return m?(m[1]+" "+m[2]).trim():""}
+function parseClass(t){let m=t.match(/([A-Z]\d{1,2})/);return m?m[1]:""}
+
+function crop(src,x,y,w,h,scale=2){
+ const c=document.createElement("canvas");c.width=Math.max(1,Math.round(w*scale));c.height=Math.max(1,Math.round(h*scale));
+ c.getContext("2d").drawImage(src,Math.round(x),Math.round(y),Math.round(w),Math.round(h),0,0,c.width,c.height);return c;
+}
+function preprocess(src){
+ const c=document.createElement("canvas");c.width=src.width;c.height=src.height;
+ const ctx=c.getContext("2d");ctx.filter="grayscale(1) contrast(1.35) brightness(1.05)";ctx.drawImage(src,0,0);return c;
+}
+function darkRatio(c,x,y,w,h){
+ const ctx=c.getContext("2d"),xx=Math.max(0,Math.floor(x)),yy=Math.max(0,Math.floor(y));
+ w=Math.min(Math.floor(w),c.width-xx);h=Math.min(Math.floor(h),c.height-yy);if(w<=0||h<=0)return 0;
+ const d=ctx.getImageData(xx,yy,w,h).data;let n=0;
+ for(let i=0;i<d.length;i+=4)if((d[i]+d[i+1]+d[i+2])/3<150)n++;
+ return n/(w*h);
+}
+function detectChange(page){
+ const sx=page.width/1536,sy=page.height/864;
+ // 画像基準：上段「変更なし」チェック=約(148,336)、下段「変更あり」=約(148,421)
+ const a=darkRatio(page,132*sx,315*sy,38*sx,40*sy);
+ const b=darkRatio(page,132*sx,400*sy,38*sx,40*sy);
+ if(a>.08 && a>b*1.25)return "なし";
+ if(b>.08 && b>a*1.25)return "あり";
+ return "未選択";
+}
+
+function render(){
+ count.textContent=`${rows.length}件`;
+ if(!rows.length){tbody.innerHTML='<tr><td colspan="9" class="empty">まだ結果がありません。</td></tr>';return}
+ tbody.innerHTML=rows.map((r,i)=>{
+  const need=!r.number||!r.name||!r.klass||r.change==="未選択";
+  return `<tr class="${need?'warn':'ok'}">
+  <td>${i+1}</td>
+  <td><input data-i="${i}" data-k="number" value="${esc(r.number)}"></td>
+  <td><input data-i="${i}" data-k="name" value="${esc(r.name)}"></td>
+  <td><input data-i="${i}" data-k="klass" value="${esc(r.klass)}"></td>
+  <td><select data-i="${i}" data-k="change"><option ${r.change==="なし"?"selected":""}>なし</option><option ${r.change==="あり"?"selected":""}>あり</option><option ${r.change==="未選択"?"selected":""}>未選択</option></select></td>
+  <td><input data-i="${i}" data-k="subject" value="${esc(r.subject)}"></td>
+  <td><input data-i="${i}" data-k="content" value="${esc(r.content)}"></td>
+  <td><input data-i="${i}" data-k="reason" value="${esc(r.reason)}"></td>
+  <td>${esc(r.file)} / ${r.page}ページ</td></tr>`}).join("");
+ tbody.querySelectorAll("input,select").forEach(el=>el.addEventListener("input",e=>{rows[+e.target.dataset.i][e.target.dataset.k]=e.target.value;render()}));
+}
+
+async function loadLibs(){
+ const pdfjs=await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs");
+ pdfjs.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+ if(!window.Tesseract)await new Promise((res,rej)=>{let s=document.createElement("script");s.src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";s.onload=res;s.onerror=rej;document.head.appendChild(s)});
+ return pdfjs;
+}
+async function pageCanvas(pdf,p){
+ const page=await pdf.getPage(p);
+ // 4:3表示に無理に引き伸ばさず、元PDFの比率を維持して高解像度でレンダリング
+ const vp=page.getViewport({scale:2.5});
+ const c=document.createElement("canvas");c.width=Math.ceil(vp.width);c.height=Math.ceil(vp.height);
+ await page.render({canvasContext:c.getContext("2d"),viewport:vp}).promise;return c;
+}
+async function ocr(worker,c,x,y,w,h){
+ const raw=preprocess(crop(c,x,y,w,h,2.2));
+ const r=await worker.recognize(raw);return norm(r.data.text||"");
+}
+
+run.onclick=async()=>{
+ run.disabled=true;csv.disabled=true;rows=[];
+ try{
+  status.textContent="PDF/OCRエンジンを準備中…";const pdfjs=await loadLibs();
+  const worker=await Tesseract.createWorker("jpn",1,{logger:m=>{if(m.status==="recognizing text")status.textContent=`項目OCR中… ${Math.round((m.progress||0)*100)}%`}});
+  await worker.setParameters({preserve_interword_spaces:"1",tessedit_pageseg_mode:"6"});
+  let total=0;for(const f of files){const pdf=await pdfjs.getDocument({data:await f.arrayBuffer()}).promise;total+=pdf.numPages}
+  let done=0;
+  for(const f of files){
+   const pdf=await pdfjs.getDocument({data:await f.arrayBuffer()}).promise;
+   for(let p=1;p<=pdf.numPages;p++){
+    done++;bar.style.width=`${Math.round(done/total*100)}%`;status.textContent=`${f.name}：${p}/${pdf.numPages}ページ`;
+    const c=await pageCanvas(pdf,p),sx=c.width/1536,sy=c.height/864;
+    // 送ってもらった画像の座標を基準に、各欄を個別OCR
+    const numberText=await ocr(worker,c,215*sx,145*sy,455*sx,100*sy);
+    const nameText=await ocr(worker,c,775*sx,145*sy,475*sx,100*sy);
+    const classText=await ocr(worker,c,1250*sx,145*sy,195*sx,100*sy);
+    const changeText=await ocr(worker,c,185*sx,465*sy,520*sx,170*sy);
+    const reasonText=await ocr(worker,c,185*sx,595*sy,700*sx,145*sy);
+    const number=parseNumber(numberText),name=parseName(nameText),klass=parseClass(classText),change=detectChange(c);
+    // 「変更内容」欄の最初の手書き語を科目として扱う。
+    let subject=changeText.replace(/変更内容|変更理由|変更申請欄|[《》「」]/g," ").trim();
+    subject=subject.split(/\s{2,}|。/)[0].trim();
+    if(subject.length>12)subject="";
+    rows.push({number,name,klass,change,subject,content:changeText,reason:reasonText,file:f.name,page:p});
+    render();
+   }
+  }
+  await worker.terminate();status.textContent=`読み取り完了：${rows.length}ページ。黄色の行を確認してください。`;csv.disabled=!rows.length;clear.disabled=false;
+ }catch(e){console.error(e);status.textContent="読み取りエラー。PDFが画像スキャンの場合でも、ページが正常に表示できるPDFか確認してください。"}
+ run.disabled=false;
+};
+clear.onclick=()=>{files=[];rows=[];filesEl.value="";run.disabled=true;csv.disabled=true;clear.disabled=true;bar.style.width="0";status.textContent="PDFを選択してください。";render()};
+csv.onclick=()=>{
+ const a=[["番号","名前","クラス","変更","科目","変更内容","変更理由","PDF","ページ"],...rows.map(r=>[r.number,r.name,r.klass,r.change,r.subject,r.content,r.reason,r.file,r.page])];
+ const text="\uFEFF"+a.map(r=>r.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n");
+ const b=new Blob([text],{type:"text/csv;charset=utf-8"}),x=document.createElement("a");x.href=URL.createObjectURL(b);x.download="講習受講確認一覧.csv";x.click();
+};
+render();
+</script>
+</body></html>
